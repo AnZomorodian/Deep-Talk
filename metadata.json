@@ -1,0 +1,6 @@
+{
+  "name": "Deep Talk",
+  "description": "A secure, high-fidelity real-time messenger featuring End-to-End Encryption, Real-Time File Sharing, Self-Destructing Messages, and Multi-Device sync.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
