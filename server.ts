@@ -91,6 +91,10 @@ async function startServer() {
   }
 
   // API: Get App state or health
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', time: Date.now() });
+  });
+
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', time: Date.now() });
   });

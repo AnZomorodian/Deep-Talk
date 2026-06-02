@@ -28,9 +28,32 @@ export function base64ToArrayBuffer(base64: string): ArrayBuffer {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/**
+ * Safe helper to get the Web Crypto API subtle interface.
+ * Throws a descriptive error if not available (e.g., non-secure context).
+ */
+function getSubtle(): SubtleCrypto {
+  const crypto = window.crypto || (window as any).msCrypto;
+  if (!crypto || !crypto.subtle) {
+    throw new Error('Web Crypto API (subtle) is not available. This usually happens in non-secure contexts (not HTTPS or localhost). Please ensure you are using HTTPS.');
+  }
+  return crypto.subtle;
+}
+
+/**
+ * Safe helper to get random values.
+ */
+function getRandomValues<T extends ArrayBufferView | null>(array: T): T {
+  const crypto = window.crypto || (window as any).msCrypto;
+  if (!crypto || !crypto.getRandomValues) {
+    throw new Error('Web Crypto API (getRandomValues) is not available.');
+  }
+  return crypto.getRandomValues(array);
+}
+
 // 1. Generate RSA-OAEP Key Pair for E2EE Key Exchange
 export async function generateE2EEKeyPair(): Promise<{ publicKey: CryptoKeyPair['publicKey']; privateKey: CryptoKeyPair['privateKey'] }> {
-  const keyPair = await window.crypto.subtle.generateKey(
+  const keyPair = await getSubtle().generateKey(
     {
       name: 'RSA-OAEP',
       modulusLength: 2048,
@@ -45,20 +68,20 @@ export async function generateE2EEKeyPair(): Promise<{ publicKey: CryptoKeyPair[
 
 // 2. Export Public Key to Base64 (SubjectPublicKeyInfo format)
 export async function exportPublicKey(key: CryptoKey): Promise<string> {
-  const exported = await window.crypto.subtle.exportKey('spki', key);
+  const exported = await getSubtle().exportKey('spki', key);
   return arrayBufferToBase64(exported);
 }
 
 // 3. Export Private Key to Base64 (PKCS#8 format)
 export async function exportPrivateKey(key: CryptoKey): Promise<string> {
-  const exported = await window.crypto.subtle.exportKey('pkcs8', key);
+  const exported = await getSubtle().exportKey('pkcs8', key);
   return arrayBufferToBase64(exported);
 }
 
 // 4. Import Public Key from Base64
 export async function importPublicKey(base64Spki: string): Promise<CryptoKey> {
   const buffer = base64ToArrayBuffer(base64Spki);
-  return await window.crypto.subtle.importKey(
+  return await getSubtle().importKey(
     'spki',
     buffer,
     {
@@ -73,7 +96,7 @@ export async function importPublicKey(base64Spki: string): Promise<CryptoKey> {
 // 5. Import Private Key from Base64
 export async function importPrivateKey(base64Pkcs8: string): Promise<CryptoKey> {
   const buffer = base64ToArrayBuffer(base64Pkcs8);
-  return await window.crypto.subtle.importKey(
+  return await getSubtle().importKey(
     'pkcs8',
     buffer,
     {
@@ -88,10 +111,10 @@ export async function importPrivateKey(base64Pkcs8: string): Promise<CryptoKey> 
 // 6. Encrypt message symmetrically using AES-GCM (returns { encryptedDataHex, ivHex })
 // We'll package this into a single composite string for easy transport
 export async function encryptSymmetric(plaintext: string, aesKey: CryptoKey): Promise<{ ciphertext: string; iv: string }> {
-  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const iv = getRandomValues(new Uint8Array(12));
   const encodedText = encoder.encode(plaintext);
   
-  const encryptedBuffer = await window.crypto.subtle.encrypt(
+  const encryptedBuffer = await getSubtle().encrypt(
     {
       name: 'AES-GCM',
       iv: iv,
@@ -112,7 +135,7 @@ export async function decryptSymmetric(ciphertextBase64: string, ivBase64: strin
   const ivBytes = new Uint8Array(base64ToArrayBuffer(ivBase64));
 
   try {
-    const decryptedBuffer = await window.crypto.subtle.decrypt(
+    const decryptedBuffer = await getSubtle().decrypt(
       {
         name: 'AES-GCM',
         iv: ivBytes,
@@ -129,7 +152,7 @@ export async function decryptSymmetric(ciphertextBase64: string, ivBase64: strin
 
 // 8. Generate Ephemeral AES Key (256-bit)
 export async function generateEphemeralAESKey(): Promise<CryptoKey> {
-  return await window.crypto.subtle.generateKey(
+  return await getSubtle().generateKey(
     {
       name: 'AES-GCM',
       length: 256,
@@ -142,9 +165,9 @@ export async function generateEphemeralAESKey(): Promise<CryptoKey> {
 // 9. Asymmetrical Wrapping: Encrypt AES Key with Recipient RSA Public Key
 export async function wrapAESKey(aesKey: CryptoKey, recipientPublicKey: CryptoKey): Promise<string> {
   // Export AES raw bytes
-  const rawAESKey = await window.crypto.subtle.exportKey('raw', aesKey);
+  const rawAESKey = await getSubtle().exportKey('raw', aesKey);
   // Encrypt raw bytes with RSA
-  const encryptedAESBytes = await window.crypto.subtle.encrypt(
+  const encryptedAESBytes = await getSubtle().encrypt(
     {
       name: 'RSA-OAEP',
     },
@@ -158,7 +181,7 @@ export async function wrapAESKey(aesKey: CryptoKey, recipientPublicKey: CryptoKe
 export async function unwrapAESKey(wrappedAESKeyBase64: string, myPrivateKey: CryptoKey): Promise<CryptoKey> {
   const wrappedBytes = base64ToArrayBuffer(wrappedAESKeyBase64);
   // Decrypt raw bytes with RSA
-  const rawAESBytes = await window.crypto.subtle.decrypt(
+  const rawAESBytes = await getSubtle().decrypt(
     {
       name: 'RSA-OAEP',
     },
@@ -167,7 +190,7 @@ export async function unwrapAESKey(wrappedAESKeyBase64: string, myPrivateKey: Cr
   );
   
   // Import raw AES Key
-  return await window.crypto.subtle.importKey(
+  return await getSubtle().importKey(
     'raw',
     rawAESBytes,
     {
@@ -184,11 +207,11 @@ export async function backupPrivateKey(
   privateKeyBase64: string,
   recoveryPassword: string
 ): Promise<{ encryptedPrivateKey: string; salt: string }> {
-  const salt = window.crypto.getRandomValues(new Uint8Array(16));
+  const salt = getRandomValues(new Uint8Array(16));
   const passwordBuffer = encoder.encode(recoveryPassword);
 
   // Import password as base key data
-  const baseKey = await window.crypto.subtle.importKey(
+  const baseKey = await getSubtle().importKey(
     'raw',
     passwordBuffer,
     'PBKDF2',
@@ -197,7 +220,7 @@ export async function backupPrivateKey(
   );
 
   // Derive encryption key from password and salt
-  const derivedKey = await window.crypto.subtle.deriveKey(
+  const derivedKey = await getSubtle().deriveKey(
     {
       name: 'PBKDF2',
       salt: salt,
@@ -215,9 +238,9 @@ export async function backupPrivateKey(
 
   // Encrypt the private key string
   const privateKeyBytes = encoder.encode(privateKeyBase64);
-  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const iv = getRandomValues(new Uint8Array(12));
   
-  const encrypted = await window.crypto.subtle.encrypt(
+  const encrypted = await getSubtle().encrypt(
     {
       name: 'AES-GCM',
       iv: iv,
@@ -252,7 +275,7 @@ export async function restorePrivateKey(
   const passwordBuffer = encoder.encode(recoveryPassword);
 
   // Import password
-  const baseKey = await window.crypto.subtle.importKey(
+  const baseKey = await getSubtle().importKey(
     'raw',
     passwordBuffer,
     'PBKDF2',
@@ -261,7 +284,7 @@ export async function restorePrivateKey(
   );
 
   // Derive decryption key
-  const derivedKey = await window.crypto.subtle.deriveKey(
+  const derivedKey = await getSubtle().deriveKey(
     {
       name: 'PBKDF2',
       salt: saltBytes,
@@ -278,7 +301,7 @@ export async function restorePrivateKey(
   );
 
   // Decrypt
-  const decryptedBuffer = await window.crypto.subtle.decrypt(
+  const decryptedBuffer = await getSubtle().decrypt(
     {
       name: 'AES-GCM',
       iv: ivBytes,

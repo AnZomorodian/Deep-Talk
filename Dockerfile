@@ -1,27 +1,23 @@
-# ---- Build stage ----
-FROM node:22-alpine AS builder
+FROM node:20-slim
+
 WORKDIR /app
 
+# Install dependencies
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 
+# Copy source code
 COPY . .
+
+# Build the application
 RUN npm run build
 
-# ---- Production stage ----
-FROM node:22-alpine AS production
-WORKDIR /app
-
-ENV NODE_ENV=production
-
-COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
-
-COPY --from=builder /app/dist ./dist
-COPY database.json ./
-
-RUN mkdir -p uploads
-
+# Expose the port the app runs on
 EXPOSE 3000
 
-CMD ["node", "dist/server.cjs"]
+# Healthcheck to ensure the server is responding
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://localhost:3000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+
+# Start the application
+CMD ["npm", "start"]
