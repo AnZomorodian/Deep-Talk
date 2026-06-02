@@ -189,21 +189,32 @@ export default function CallWindow({ call, currentUserId, onAccept, onReject, on
             </div>
           ) : (
             // Audio-only or outgoing call state
-            <div className="flex flex-col items-center justify-center text-center p-8 z-10">
-              <div className="relative mb-6">
-                <div className="absolute -inset-4 bg-sky-500/10 rounded-full blur-xl animate-pulse"></div>
-                <div className="relative w-24 h-24 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-200 shadow-2xl">
-                  <User size={44} className="text-sky-400" />
+            <div className="flex flex-col items-center justify-center text-center p-8 z-10 relative w-full h-full">
+              <div className="relative mb-6 flex items-center justify-center">
+                {/* Ripple voice waves */}
+                <span className="absolute w-36 h-36 rounded-full bg-sky-500/5 animate-[ping_2s_infinite]" />
+                <span className="absolute w-28 h-28 rounded-full bg-sky-500/10 animate-[ping_1.5s_infinite]" />
+                <div className="absolute -inset-4 bg-sky-500/15 rounded-full blur-xl animate-pulse"></div>
+                <div className="relative w-20 h-20 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-200 shadow-2xl relative z-10">
+                  <User size={36} className="text-sky-450" />
                 </div>
               </div>
-              <h2 className="text-lg font-bold font-sans text-white uppercase tracking-tight">
+              <h2 className="text-base font-bold font-sans text-white uppercase tracking-tight relative z-10">
                 {isOutgoing ? call.receiverId : call.callerName}
               </h2>
-              <p className="text-[10px] text-sky-450 mt-2 font-mono uppercase tracking-wider font-bold">
+              <p className="text-[10px] text-sky-450 mt-2.5 font-mono uppercase tracking-wider font-bold relative z-10 bg-sky-500/10 px-2.5 py-1 rounded-md border border-sky-500/15">
                 {call.status === 'outgoing' && 'Ringing client devices...'}
                 {call.status === 'incoming' && 'Incoming video call...'}
                 {call.status === 'connected' && `Call in progress: ${formatDuration(duration)}`}
               </p>
+
+              {/* Secure E2EE key fingerprint status under the caller ID */}
+              <div className="mt-6 p-2 bg-slate-950/60 border border-slate-850/80 rounded-xl relative z-10 max-w-[200px] text-center shadow-lg">
+                <span className="text-[8px] font-mono text-slate-500 block uppercase tracking-widest font-bold">TUNNEL SYNC ID</span>
+                <span className="text-[9px] font-mono text-emerald-450 font-bold block select-all break-all tracking-wider mt-1">
+                  SECURE-LINE-{(call.callerId + call.roomId).substring(0, 10).toUpperCase()}
+                </span>
+              </div>
             </div>
           )}
 

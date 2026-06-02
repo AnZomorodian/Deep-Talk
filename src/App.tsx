@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Send, Shield, Lock, Unlock, Phone, Video, Users, UserPlus, File, Paperclip, Trash2, Pin,
-  Undo2, RefreshCw, Layers, Check, CheckCheck, Smile, BookOpen, Settings, LogOut, Info, AlertTriangle, Eye, Download, Flame, Clock, Share2, HelpCircle, Search, X, CornerUpLeft, Mic, MicOff, CornerUpRight, MapPin, CreditCard, Compass, Radio, DollarSign, QrCode, Scan, Star, Archive, ArchiveRestore, Copy
+  Undo2, RefreshCw, Layers, Check, CheckCheck, Smile, BookOpen, Settings, LogOut, Info, AlertTriangle, Eye, Download, Flame, Clock, Share2, HelpCircle, Search, X, CornerUpLeft, Mic, MicOff, CornerUpRight, MapPin, CreditCard, Compass, Radio, DollarSign, QrCode, Scan, Star, Archive, ArchiveRestore, Copy, User, FileText, Code, Table, Ban, MessageSquare
 } from 'lucide-react';
 
 import { Device, UserProfile, Message, Chat, CallState, SyncEvent, Reaction } from './types';
@@ -13,7 +13,9 @@ import {
 
 import CallWindow from './components/CallWindow';
 import NotesTab from './components/NotesTab';
+import ThreadTab from './components/ThreadTab';
 import DeviceManager from './components/DeviceManager';
+import VoiceAudioPlayer from './components/VoiceAudioPlayer';
 
 export default function App() {
   // Auth & Session States
@@ -31,7 +33,8 @@ export default function App() {
   const [allMyMessages, setAllMyMessages] = useState<Message[]>([]);
 
   // UI Panels
-  const [activeRightTab, setActiveRightTab] = useState<'notes' | 'settings' | 'none'>('none');
+  const [activeRightTab, setActiveRightTab] = useState<'notes' | 'settings' | 'thread' | 'none'>('none');
+  const [activeThreadMessage, setActiveThreadMessage] = useState<Message | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(true);
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
@@ -74,6 +77,17 @@ export default function App() {
   
   // active video call
   const [ongoingCall, setOngoingCall] = useState<CallState | null>(null);
+
+  // Scheduled Messages States
+  const [scheduledMessages, setScheduledMessages] = useState<any[]>([]);
+  const [scheduledTime, setScheduledTime] = useState<string>('');
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [showScheduledListModal, setShowScheduledListModal] = useState(false);
+  const [isScheduling, setIsScheduling] = useState(false);
+
+  // Viewing Other User Profile
+  const [viewingUserProfile, setViewingUserProfile] = useState<UserProfile | null>(null);
+  const [blockingInProgress, setBlockingInProgress] = useState(false);
 
   // Pinned conversations state
   const [pinnedChatIds, setPinnedChatIds] = useState<{ [chatId: string]: boolean }>({});
@@ -548,6 +562,14 @@ export default function App() {
             break;
           }
 
+          case 'scheduled_updated': {
+            const { chatId } = payload;
+            if (activeChatId && chatId === activeChatId) {
+              fetchScheduledMessages(chatId);
+            }
+            break;
+          }
+
           default:
             break;
         }
@@ -566,8 +588,10 @@ export default function App() {
   useEffect(() => {
     if (activeChatId) {
       fetchMessages(activeChatId);
+      fetchScheduledMessages(activeChatId);
     } else {
       setMessages([]);
+      setScheduledMessages([]);
     }
   }, [activeChatId]);
 
@@ -691,6 +715,139 @@ export default function App() {
       setAllMyMessages(list);
     } catch (e) {
       console.error('Failed to load user messages across channels:', e);
+    }
+  };
+
+  const fetchScheduledMessages = async (chatId: string) => {
+    try {
+      const res = await fetch(`/api/chats/${chatId}/scheduled`);
+      const data = await res.json();
+      setScheduledMessages(data);
+    } catch (err) {
+      console.error('Failed to load scheduled messages:', err);
+    }
+  };
+
+  const handleCancelScheduledMessage = async (messageId: string) => {
+    try {
+      const res = await fetch(`/api/scheduled/${messageId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setScheduledMessages(prev => prev.filter(m => m.id !== messageId));
+      }
+    } catch (err) {
+      console.error('Failed to cancel scheduled message:', err);
+    }
+  };
+
+  const handleConfirmScheduleMessage = async () => {
+    if (!currentUser || !activeChatId) return;
+    if (!messageInput.trim() && !selectedFile) {
+      alert('Cannot schedule an empty message.');
+      return;
+    }
+    if (!scheduledTime) {
+      alert('Please select a valid date & time.');
+      return;
+    }
+
+    const epochTime = new Date(scheduledTime).getTime();
+    if (epochTime <= Date.now()) {
+      alert('Please schedule a future date & time.');
+      return;
+    }
+
+    const chat = chats.find(c => c.id === activeChatId);
+    if (!chat) return;
+
+    setIsScheduling(true);
+    try {
+      let finalContent = messageInput;
+      let isEncryptedPayload = false;
+      let finalFileUrl: string | undefined = undefined;
+
+      // Handle file sharing upload first
+      if (selectedFile) {
+        const fileRes = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: selectedFile.name,
+            fileType: selectedFile.type,
+            fileDataB64: selectedFile.base64
+          })
+        });
+        const fileJson = await fileRes.json();
+        finalFileUrl = fileJson.fileUrl;
+      }
+
+      // Check if chat is private / direct (means E2EE is enabled!)
+      if (chat.type === 'direct') {
+        const recipientId = chat.participants.find(p => p !== currentUser.id);
+        const recipientObject = allUsers.find(u => u.id === recipientId);
+
+        if (recipientObject) {
+          isEncryptedPayload = true;
+          // Encrypt plain message client-side under recipient's public key (double-wrapping under recipient & sender)
+          const textToEncrypt = JSON.stringify({
+            text: messageInput || '[Attachment Shared]',
+            fileUrl: finalFileUrl,
+            fileName: selectedFile?.name,
+            fileSize: selectedFile?.size
+          });
+
+          finalContent = await encryptE2EE(textToEncrypt, recipientObject.publicKey, currentUser.publicKey);
+        }
+      } else if (chat.type === 'saved') {
+        isEncryptedPayload = true;
+        // Encrypt plain message client-side under user's own public key
+        const textToEncrypt = JSON.stringify({
+          text: messageInput || '[Attachment Shared]',
+          fileUrl: finalFileUrl,
+          fileName: selectedFile?.name,
+          fileSize: selectedFile?.size
+        });
+
+        finalContent = await encryptE2EE(textToEncrypt, currentUser.publicKey, currentUser.publicKey);
+      }
+
+      // Post scheduled payload
+      const scheduledPayload = {
+        senderId: currentUser.id,
+        senderName: currentUser.displayName,
+        content: finalContent,
+        isEncrypted: isEncryptedPayload,
+        type: selectedFile ? 'file' : 'text',
+        fileName: selectedFile?.name,
+        fileSize: selectedFile?.size,
+        fileMimeType: selectedFile?.type,
+        fileUrl: finalFileUrl,
+        selfDestructDuration: selfDestructSecs,
+        replyToId: replyToId || undefined,
+        scheduledAt: epochTime
+      };
+
+      await fetch(`/api/chats/${activeChatId}/scheduled`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(scheduledPayload)
+      });
+
+      // Clear states
+      setMessageInput('');
+      setSelectedFile(null);
+      setSelfDestructSecs(0);
+      setReplyToId(null);
+      setShowScheduleModal(false);
+      
+      if (currentUser && activeChatId) {
+        localStorage.removeItem(`secure_telegram_draft_${currentUser.id}_${activeChatId}`);
+      }
+
+      fetchScheduledMessages(activeChatId);
+    } catch (err) {
+      console.error('Failed to schedule message:', err);
+    } finally {
+      setIsScheduling(false);
     }
   };
 
@@ -1744,6 +1901,66 @@ export default function App() {
     }
   };
 
+  const handleSendThreadReply = async (content: string) => {
+    if (!currentUser || !activeChatId || !activeThreadMessage) return;
+
+    const chat = chats.find(c => c.id === activeChatId);
+    if (!chat) return;
+
+    try {
+      let finalContent = content;
+      let isEncryptedPayload = false;
+
+      // Check if E2EE is enabled based on chat type (direct, saved)
+      if (chat.type === 'direct') {
+        const recipientId = chat.participants.find(p => p !== currentUser.id);
+        const recipientObject = allUsers.find(u => u.id === recipientId);
+
+        if (recipientObject) {
+          isEncryptedPayload = true;
+          const textToEncrypt = JSON.stringify({
+            text: content,
+            fileUrl: undefined,
+            fileName: undefined,
+            fileSize: undefined
+          });
+          finalContent = await encryptE2EE(textToEncrypt, recipientObject.publicKey, currentUser.publicKey);
+        }
+      } else if (chat.type === 'saved') {
+        isEncryptedPayload = true;
+        const textToEncrypt = JSON.stringify({
+          text: content,
+          fileUrl: undefined,
+          fileName: undefined,
+          fileSize: undefined
+        });
+        finalContent = await encryptE2EE(textToEncrypt, currentUser.publicKey, currentUser.publicKey);
+      }
+
+      const msgPayload = {
+        senderId: currentUser.id,
+        senderName: currentUser.displayName,
+        content: finalContent,
+        isEncrypted: isEncryptedPayload,
+        type: 'text',
+        replyToId: activeThreadMessage.id
+      };
+
+      const res = await fetch(`/api/chats/${activeChatId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(msgPayload)
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json();
+        alert(errJson.error || 'Failed to send thread reply.');
+      }
+    } catch (err) {
+      console.error('Failed to dispatch secure thread message:', err);
+    }
+  };
+
   // Mark Message as Viewed
   const markMessageAsViewed = async (messageId: string) => {
     if (!currentUser) return;
@@ -1808,13 +2025,17 @@ export default function App() {
     }
   };
 
-  const handleUpdatePrivacySettings = async (disableReceipts: boolean) => {
+  const handleUpdatePrivacySettings = async (disableReceipts: boolean, onlineShow?: boolean, reactionShow?: boolean) => {
     if (!currentUser) return;
     try {
       const res = await fetch(`/api/users/${currentUser.id}/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ disableReadReceipts: disableReceipts })
+        body: JSON.stringify({ 
+          disableReadReceipts: disableReceipts,
+          onlineShow: onlineShow !== undefined ? onlineShow : currentUser.onlineShow,
+          reactionShow: reactionShow !== undefined ? reactionShow : currentUser.reactionShow
+        })
       });
       const updatedUser = await res.json();
       setCurrentUser(updatedUser);
@@ -1824,13 +2045,21 @@ export default function App() {
     }
   };
 
-  const handleUpdateProfileSettings = async (displayName: string, avatarUrl: string, email?: string, bio?: string, phone?: string) => {
+  const handleUpdateProfileSettings = async (
+    displayName: string,
+    avatarUrl: string,
+    email?: string,
+    bio?: string,
+    phone?: string,
+    badge?: string,
+    bannerStyle?: string
+  ) => {
     if (!currentUser) return;
     try {
       const res = await fetch(`/api/users/${currentUser.id}/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ displayName, avatarUrl, email, bio, phone })
+        body: JSON.stringify({ displayName, avatarUrl, email, bio, phone, badge, bannerStyle })
       });
       const updatedUser = await res.json();
       setCurrentUser(updatedUser);
@@ -1840,7 +2069,45 @@ export default function App() {
     }
   };
 
-  const handleExportHistory = (format: 'txt' | 'html') => {
+  const handleToggleBlockUser = async (targetUserId: string) => {
+    if (!currentUser) return;
+    try {
+      setBlockingInProgress(true);
+      const currentlyBlocked = currentUser.blockedUsers || [];
+      const isCurrentlyBlocked = currentlyBlocked.includes(targetUserId);
+      const newBlockedList = isCurrentlyBlocked
+        ? currentlyBlocked.filter(id => id !== targetUserId)
+        : [...currentlyBlocked, targetUserId];
+
+      const res = await fetch(`/api/users/${currentUser.id}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blockedUsers: newBlockedList })
+      });
+      const updatedUser = await res.json();
+      setCurrentUser(updatedUser);
+      setViewingUserProfile(null);
+      
+      // Deselect blocked chat if it was active
+      const activeChat = chats.find(c => c.id === activeChatId);
+      if (activeChat && activeChat.type === 'direct' && activeChat.participants.includes(targetUserId)) {
+        setActiveChatId(null);
+      }
+
+      if (currentUser) {
+        await fetchChats(currentUser.id);
+        if (activeChatId) {
+          await fetchMessages(activeChatId);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to toggle block state:', e);
+    } finally {
+      setBlockingInProgress(false);
+    }
+  };
+
+  const handleExportHistory = (format: 'txt' | 'html' | 'json' | 'md' | 'csv') => {
     if (!activeChatId) return;
     const activeChat = chats.find(c => c.id === activeChatId);
     if (!activeChat) return;
@@ -2131,6 +2398,79 @@ export default function App() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+    } else if (format === 'json') {
+      const jsonBackup = {
+        chatName,
+        exportDate: new Date().toISOString(),
+        totalMessages: formattedMsgs.length,
+        messages: formattedMsgs.map(m => ({
+          id: m.id,
+          timestamp: m.timeStr,
+          author: m.senderName,
+          body: m.content,
+          attachmentUrl: m.fileUrl,
+          attachmentName: m.fileName,
+          attachmentSize: m.fileSize
+        }))
+      };
+      const blob = new Blob([JSON.stringify(jsonBackup, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `chat_history_${chatName.toLowerCase().replace(/[^a-z0-9]/g, '_')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } else if (format === 'md') {
+      let mdContent = `# Deep Talk Chat History - ${chatName}\n\n`;
+      mdContent += `* **Export Date:** ${new Date().toISOString().replace('T', ' ').substring(0, 19)} UTC\n`;
+      mdContent += `* **Total Messages:** ${formattedMsgs.length}\n\n`;
+      mdContent += `---\n\n`;
+
+      formattedMsgs.forEach(m => {
+        mdContent += `### **${m.senderName}** <sub style="color: #64748B;">${m.timeStr}</sub>\n\n`;
+        mdContent += `${m.content}\n\n`;
+        if (m.fileName) {
+          mdContent += `* 📎 **Attachment:** [${m.fileName}](${window.location.origin}${m.fileUrl || '#'}) (${m.fileSize ? (m.fileSize / 1024).toFixed(1) + ' KB' : 'unknown size'})\n\n`;
+        }
+        mdContent += `---\n\n`;
+      });
+
+      const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `chat_history_${chatName.toLowerCase().replace(/[^a-z0-9]/g, '_')}.md`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } else if (format === 'csv') {
+      const csvRows = [
+        ['Message ID', 'Timestamp (UTC)', 'Sender Name', 'Username', 'Message Type', 'Content', 'Attachment Name', 'Attachment URL'],
+        ...formattedMsgs.map(m => [
+          m.id,
+          m.timeStr,
+          m.senderName.replace(/"/g, '""'),
+          m.username,
+          m.fileName ? 'File' : 'Text',
+          m.content.replace(/"/g, '""'),
+          m.fileName ? m.fileName.replace(/"/g, '""') : '',
+          m.fileUrl || ''
+        ])
+      ];
+
+      const csvContent = csvRows.map(row => row.map(val => `"${val}"`).join(',')).join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `chat_history_${chatName.toLowerCase().replace(/[^a-z0-9]/g, '_')}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
     }
   };
 
@@ -2307,9 +2647,6 @@ export default function App() {
       {/* 1. Header Toolbar */}
       <header className="h-16 border-b border-slate-800/50 flex items-center justify-between px-6 backdrop-blur-md bg-[#0A0C12]/80 z-10 shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-sky-500 flex items-center justify-center shadow-[0_0_15px_rgba(14,165,233,0.4)] transition-transform duration-300 hover:scale-105">
-            <Shield className="text-white fill-white/15" size={16} />
-          </div>
           <div className="flex flex-col">
             <h1 className="text-xs font-bold uppercase tracking-tight text-white flex items-center gap-1.5 font-sans">
               Deep Talk
@@ -2935,7 +3272,7 @@ export default function App() {
                           <Download size={16} />
                         </button>
                         {showExportMenu && (
-                          <div id="export-history-dropdown" className="absolute right-0 mt-2 w-52 rounded-xl bg-[#0F131D] border border-slate-800/90 p-1.5 shadow-[0_10px_30px_rgba(0,0,0,0.6)] z-30 font-sans">
+                          <div id="export-history-dropdown" className="absolute right-0 mt-2 w-56 rounded-xl bg-[#0F131D] border border-slate-800/90 p-1.5 shadow-[0_10px_30px_rgba(0,0,0,0.6)] z-30 font-sans">
                             <span className="block px-3 py-1.5 text-[8.5px] font-bold text-slate-500 font-mono uppercase tracking-widest leading-none border-b border-slate-800/40 mb-1">Backup Formats</span>
                             <button
                               onClick={() => {
@@ -2944,7 +3281,7 @@ export default function App() {
                               }}
                               className="w-full text-left px-3 py-2 text-[11px] text-slate-350 hover:text-white hover:bg-slate-800/45 rounded-lg transition-all flex items-center gap-2.5 cursor-pointer font-medium"
                             >
-                              <File size={13} className="text-sky-400" />
+                              <File size={13} className="text-sky-455 text-sky-400" />
                               Save as Plain Text (.txt)
                             </button>
                             <button
@@ -2956,6 +3293,36 @@ export default function App() {
                             >
                               <Layers size={13} className="text-emerald-400" />
                               Save as Styled HTML (.html)
+                            </button>
+                            <button
+                              onClick={() => {
+                                handleExportHistory('md');
+                                setShowExportMenu(false);
+                              }}
+                              className="w-full text-left px-3 py-2 text-[11px] text-slate-350 hover:text-white hover:bg-slate-800/45 rounded-lg transition-all flex items-center gap-2.5 cursor-pointer font-medium"
+                            >
+                              <FileText size={13} className="text-pink-400" />
+                              Markdown Report (.md)
+                            </button>
+                            <button
+                              onClick={() => {
+                                handleExportHistory('json');
+                                setShowExportMenu(false);
+                              }}
+                              className="w-full text-left px-3 py-2 text-[11px] text-slate-350 hover:text-white hover:bg-slate-800/45 rounded-lg transition-all flex items-center gap-2.5 cursor-pointer font-medium"
+                            >
+                              <Code size={13} className="text-indigo-400" />
+                              Structured Data (.json)
+                            </button>
+                            <button
+                              onClick={() => {
+                                handleExportHistory('csv');
+                                setShowExportMenu(false);
+                              }}
+                              className="w-full text-left px-3 py-2 text-[11px] text-slate-350 hover:text-white hover:bg-slate-800/45 rounded-lg transition-all flex items-center gap-2.5 cursor-pointer font-medium"
+                            >
+                              <Table size={13} className="text-amber-400" />
+                              Excel Comma Separated (.csv)
                             </button>
                           </div>
                         )}
@@ -3305,29 +3672,9 @@ export default function App() {
                             </div>
                           )}
 
-                          {/* Pin / Unpin message buttons */}
-                          {!isRecalled && (() => {
-                            const activeChat = chats.find(c => c.id === activeChatId);
-                            if (!activeChat) return null;
-                            const isPinned = activeChat.pinnedMessageId === msg.id;
-                            return (
-                              <button
-                                onClick={() => handleTogglePinMessage(activeChat.id, isPinned ? null : msg.id)}
-                                className={`absolute ${isSelf ? '-right-8' : '-left-8'} top-1/2 -translate-y-1/2 p-1 bg-[#0E121A] rounded-lg border transition-all shadow hidden group-hover/msg:block ${
-                                  isPinned 
-                                    ? 'text-amber-450 border-amber-500/40 hover:text-amber-400' 
-                                    : 'text-slate-500 hover:text-white border-slate-800 hover:border-slate-750'
-                                } cursor-pointer`}
-                                title={isPinned ? "Unpin message" : "Pin message to chat"}
-                              >
-                                <Pin size={12} className={isPinned ? "rotate-45" : ""} />
-                              </button>
-                            );
-                          })()}
-
-                          {/* Improved Unified Hover Action Menu (Reply, Forward, Hard Delete) */}
+                          {/* Unified Hover Action Menu (Star, Reply, Forward, Pin, Hard Delete) */}
                           {!isRecalled && (
-                            <div className={`absolute ${isSelf ? '-left-[116px]' : '-right-[116px]'} flex items-center gap-1.5 bg-[#0A0C14]/95 backdrop-blur-md px-1.5 py-1 rounded-xl border border-slate-800/85 hover:border-slate-700/80 shadow-[0_10px_30px_rgba(0,0,0,0.5)] hidden group-hover/msg:flex z-20 transition-all top-1/2 -translate-y-1/2`}>
+                            <div className={`absolute ${isSelf ? '-left-[142px]' : '-right-[142px]'} flex items-center gap-1.5 bg-[#0A0C14]/93 backdrop-blur-md px-1.5 py-1 rounded-xl border border-slate-800/85 hover:border-slate-700/80 shadow-[0_10px_30px_rgba(0,0,0,0.5)] hidden group-hover/msg:flex z-20 transition-all top-1/2 -translate-y-1/2`}>
                               {/* Star / Unstar Action */}
                               <button
                                 onClick={() => handleToggleStarMessage(msg.id)}
@@ -3342,9 +3689,13 @@ export default function App() {
                               </button>
 
                               <button
-                                onClick={() => setReplyToId(msg.id)}
+                                onClick={() => {
+                                  setActiveThreadMessage(msg);
+                                  setActiveRightTab('thread');
+                                  setReplyToId(msg.id);
+                                }}
                                 className="p-1 text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 rounded-md transition-all cursor-pointer"
-                                title="Reply (Thread citation link)"
+                                title="Reply & Start E2EE Thread"
                               >
                                 <CornerUpLeft size={12} />
                               </button>
@@ -3356,6 +3707,26 @@ export default function App() {
                                 <CornerUpRight size={12} />
                               </button>
                               
+                              {/* Pin Toggle Control right next to Delete */}
+                              {(() => {
+                                const activeChat = chats.find(c => c.id === activeChatId);
+                                if (!activeChat) return null;
+                                const isPinned = activeChat.pinnedMessageId === msg.id;
+                                return (
+                                  <button
+                                    onClick={() => handleTogglePinMessage(activeChat.id, isPinned ? null : msg.id)}
+                                    className={`p-1 rounded-md transition-all cursor-pointer hover:bg-amber-500/10 ${
+                                      isPinned 
+                                        ? 'text-amber-450' 
+                                        : 'text-slate-400 hover:text-white'
+                                    }`}
+                                    title={isPinned ? "Unpin message" : "Pin message to chat"}
+                                  >
+                                    <Pin size={12} className={isPinned ? "rotate-45" : ""} />
+                                  </button>
+                                );
+                              })()}
+
                               {/* Hard Deletion Action */}
                               <button
                                 onClick={() => setMessageDeletingId(msg.id)}
@@ -3432,13 +3803,26 @@ export default function App() {
                                     <span className="text-[9px] text-emerald-400 font-mono font-bold tracking-tight uppercase block">Secure GPS Signal</span>
                                   </div>
                                 </div>
-                                <div className="relative h-28 bg-[#10131F] rounded-lg border border-slate-800 overflow-hidden flex flex-col items-center justify-center p-3 parent-radar-glow">
-                                  <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(52,211,153,0.06),transparent)] animate-pulse" />
-                                  <div className="absolute w-24 h-24 rounded-full border border-emerald-500/10 animate-ping duration-1000" />
-                                  <div className="absolute w-12 h-12 rounded-full border border-emerald-500/20 animate-ping duration-3000" />
-                                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-white relative z-10 shadow-[0_0_10px_rgba(52,211,153,0.8)]" />
-                                  <div className="text-[9.5px] text-slate-500 font-mono mt-3 text-center leading-normal relative z-10">
-                                    COORD: {locationPayload.lat.toFixed(5)}, {locationPayload.lng.toFixed(5)}
+                                <div className="relative h-28 bg-[#0F121D] rounded-lg border border-slate-800/80 overflow-hidden flex flex-col items-center justify-center p-3 parent-radar-glow">
+                                  {/* Cyber Grid Lines Overlay */}
+                                  <div className="absolute inset-0 opacity-[0.03] bg-[linear-gradient(to_right,#808080_1px,transparent_1px),linear-gradient(to_bottom,#808080_1px,transparent_1px)] bg-[size:14px_24px]" />
+                                  
+                                  {/* Radar Sweep Effect */}
+                                  <div className="absolute inset-0 bg-[conic-gradient(from_0deg,transparent_50%,rgba(16,185,129,0.1)_100%)] animate-[spin_5s_linear_infinite]" />
+                                  
+                                  <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(16,185,129,0.08),transparent)] animate-pulse" />
+                                  
+                                  {/* Dynamic Radar Ring */}
+                                  <div className="absolute w-20 h-20 rounded-full border border-emerald-500/15 animate-[ping_3s_infinite]" />
+                                  <div className="absolute w-10 h-10 rounded-full border border-emerald-400/25 animate-[ping_1.5s_infinite]" />
+                                  
+                                  {/* Center Pin Indicator */}
+                                  <div className="w-3 h-3 rounded-full bg-emerald-400 border-2 border-slate-900 relative z-10 shadow-[0_0_15px_rgba(52,211,153,1)] animate-bounce duration-1000" />
+                                  
+                                  <div className="relative z-10 bg-slate-950/70 border border-slate-850 px-2 py-0.5 rounded mt-3 backdrop-blur-sm shadow-sm">
+                                    <span className="text-[8.5px] text-slate-400 font-mono tracking-widest uppercase font-bold">
+                                      COORD: {locationPayload.lat.toFixed(5)}, {locationPayload.lng.toFixed(5)}
+                                    </span>
                                   </div>
                                 </div>
                                 <a
@@ -3579,19 +3963,7 @@ export default function App() {
                               <div className="mt-2 flex flex-col gap-2">
                                 {/* If voice or audio file, show visual player */}
                                 {isAudio && (
-                                  <div className="p-2.5 rounded-xl border border-slate-800/50 bg-[#0E121A]/85 w-72 max-w-full font-sans">
-                                    <div className="flex items-center gap-2 mb-2 text-sky-400 font-mono font-bold text-[9px] uppercase tracking-wider">
-                                      <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0 border border-rose-500/20" />
-                                      <span>E2EE Voice Message</span>
-                                    </div>
-                                    <audio
-                                      src={decryptedFileUrl}
-                                      controls
-                                      preload="none"
-                                      className="w-full h-8 max-h-8 select-none outline-none bg-[#0A0C12] rounded"
-                                      referrerPolicy="no-referrer"
-                                    />
-                                  </div>
+                                  <VoiceAudioPlayer src={decryptedFileUrl!} />
                                 )}
 
                                 {/* If image or video, show visual thumbnail */}
@@ -3689,6 +4061,24 @@ export default function App() {
                               <span className="uppercase">SELF-DESTRUCT IN 00:{remainingSelfDestructSeconds.toString().padStart(2, '0')}s</span>
                             </div>
                           )}
+
+                          {/* Thread sub-conversation indicator link */}
+                          {(() => {
+                            const count = messages.filter(m => m.replyToId === msg.id).length;
+                            if (count === 0) return null;
+                            return (
+                              <button
+                                onClick={() => {
+                                  setActiveThreadMessage(msg);
+                                  setActiveRightTab('thread');
+                                }}
+                                className="mt-2 text-[10px] text-sky-450 font-mono font-semibold flex items-center gap-1.5 hover:underline cursor-pointer bg-sky-500/10 py-1.5 px-2.5 border border-sky-500/15 rounded-lg saturate-75 w-max tracking-wide text-left"
+                              >
+                                <MessageSquare size={10} />
+                                <span>{count} {count === 1 ? 'thread reply' : 'thread replies'}</span>
+                              </button>
+                            );
+                          })()}
                         </div>
 
                         {/* Message Reactions render row */}
@@ -3758,6 +4148,26 @@ export default function App() {
                     onSubmit={handleSendMessage}
                     className="p-4 bg-[#0E121A]/80 backdrop-blur-md border-t border-slate-800/50 flex flex-col gap-2.5 shrink-0"
                   >
+                    {/* Scheduled Messages Queue Status Indicator */}
+                    {scheduledMessages.length > 0 && (
+                      <div className="px-3 py-1.5 rounded-lg bg-[#0C1525]/90 border border-sky-500/15 text-sky-400 font-mono text-[10px] flex items-center justify-between gap-3 font-semibold shrink-0 shadow-[0_2px_8px_rgba(14,165,233,0.03)] animate-fade-in">
+                        <div className="flex items-center gap-2.5 uppercase tracking-wide">
+                          <span className="relative flex h-1.5 w-1.5">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-sky-400"></span>
+                          </span>
+                          <span>{scheduledMessages.length} message{scheduledMessages.length > 1 ? 's' : ''} scheduled for dispatch</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowScheduledListModal(true)}
+                          className="px-2.5 py-1 bg-sky-500/10 hover:bg-sky-500 hover:text-slate-950 border border-sky-500/20 rounded text-[8.5px] font-mono font-bold uppercase transition-all tracking-widest cursor-pointer"
+                        >
+                          View Queue
+                        </button>
+                      </div>
+                    )}
+
                     {/* Attachment Warning Banner */}
                     {attachmentWarning && (
                       <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-between gap-3 text-[11px] text-red-400 font-sans">
@@ -3908,33 +4318,62 @@ export default function App() {
                             >
                               <CreditCard size={15} />
                             </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const defaultTime = new Date(Date.now() + 5 * 60000); // Default schedule to +5 mins
+                                const tzOffset = defaultTime.getTimezoneOffset() * 60000;
+                                const localISOTime = (new Date(defaultTime.getTime() - tzOffset)).toISOString().slice(0, 16);
+                                setScheduledTime(localISOTime);
+                                setShowScheduleModal(true);
+                              }}
+                              className="h-10 w-10 flex items-center justify-center bg-[#1A1F2B] hover:bg-sky-505/10 hover:bg-sky-500/10 text-sky-400 hover:text-sky-350 rounded-lg transition-all border border-slate-800/60 active:scale-95 cursor-pointer"
+                              title="Schedule message for automated delivery"
+                            >
+                              <Clock size={15} />
+                            </button>
                           </>
                         )}
                       </div>
 
                       {/* Main Input or Recording HUD */}
                       {isRecording ? (
-                        <div className="flex-1 flex items-center justify-between h-10 px-3.5 bg-rose-950/20 border border-rose-500/25 rounded-lg animate-pulse font-sans">
-                          <div className="flex items-center gap-2.5">
-                            <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-                            <span className="text-[11px] font-bold text-rose-400 font-mono tracking-wider uppercase">
-                              Recording Voice • {formatSeconds(recordingSeconds)}
+                        <div className="flex-1 flex items-center justify-between h-10 px-3 bg-rose-950/25 border border-rose-500/30 rounded-lg font-sans shadow-[0_0_12px_rgba(239,68,68,0.05)]">
+                          <div className="flex items-center gap-2">
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
                             </span>
+                            
+                            <span className="text-[10.5px] font-bold text-rose-455 text-rose-400 font-mono tracking-wider uppercase flex items-center gap-1.5">
+                              RECORDING VOICE • {formatSeconds(recordingSeconds)}
+                            </span>
+
+                            {/* Tactical Audio Sync Wave */}
+                            <div className="flex items-end gap-[2px] h-2.5 ml-1 leading-none shrink-0 select-none">
+                              <span className="w-[1.5px] h-1.5 bg-rose-500 rounded-full animate-pulse [animation-delay:0.1s]"></span>
+                              <span className="w-[1.5px] h-2.5 bg-rose-500 rounded-full animate-pulse [animation-delay:0.3s]"></span>
+                              <span className="w-[1.5px] h-1 bg-rose-500 rounded-full animate-pulse [animation-delay:0s]"></span>
+                              <span className="w-[1.5px] h-2 bg-rose-500 rounded-full animate-pulse [animation-delay:0.5s]"></span>
+                              <span className="w-[1.5px] h-1.5 bg-rose-500 rounded-full animate-pulse [animation-delay:0.2s]"></span>
+                            </div>
                           </div>
+                          
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
                               onClick={cancelVoiceRecording}
-                              className="px-2.5 py-1 text-[10px] text-slate-400 hover:text-white bg-slate-900 border border-slate-800 rounded font-bold uppercase tracking-wider cursor-pointer font-sans transition-colors"
+                              className="px-2.5 py-1 text-[9.5px] text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-900 border border-slate-800/80 hover:border-slate-700/85 rounded font-bold uppercase tracking-wider cursor-pointer font-sans transition-all active:scale-95"
                             >
                               Discard
                             </button>
                             <button
                               type="button"
                               onClick={stopVoiceRecording}
-                              className="px-2.5 py-1 text-[10px] bg-sky-500 hover:bg-sky-450 text-white rounded font-bold uppercase tracking-wider cursor-pointer font-sans flex items-center gap-1 transition-all"
+                              className="px-2.5 py-1 text-[9.5px] bg-rose-500 hover:bg-rose-450 text-slate-950 rounded font-bold uppercase tracking-wider cursor-pointer font-sans flex items-center gap-1 transition-all shadow-[0_2px_8px_rgba(239,68,68,0.2)] active:scale-95"
                             >
-                              <MicOff size={11} /> Stop & Attach
+                              <MicOff size={10} /> STOP & ATTACH
                             </button>
                           </div>
                         </div>
@@ -4027,6 +4466,25 @@ export default function App() {
             onRestoreKey={handleDeviceRestoreKeyring}
             onUpdateSettings={handleUpdatePrivacySettings}
             onUpdateProfile={handleUpdateProfileSettings}
+          />
+        )}
+
+        {activeRightTab === 'thread' && activeThreadMessage && activeChatId && (
+          <ThreadTab
+            parentMessage={activeThreadMessage}
+            messages={messages}
+            decryptedCache={decryptedCache}
+            currentUser={currentUser}
+            onSendReply={async (content) => {
+              await handleSendThreadReply(content);
+            }}
+            onClose={() => {
+              setActiveRightTab('none');
+              setActiveThreadMessage(null);
+            }}
+            onScrollToMessage={(msgId) => {
+              handleScrollToMessage(msgId);
+            }}
           />
         )}
 
@@ -5385,6 +5843,256 @@ export default function App() {
               </div>
             )}
 
+          </div>
+        </div>
+      )}
+
+      {/* 9. Post Scheduled Message Picker Modal */}
+      {showScheduleModal && (
+        <div id="schedule-message-modal" className="fixed inset-0 z-50 flex items-center justify-center bg-[#010204]/90 backdrop-blur-md p-4 animate-fade-in animate-duration-200">
+          <div className="relative w-full max-w-sm overflow-hidden rounded-2xl bg-[#0E121A] border border-slate-800 shadow-[0_0_50px_rgba(0,0,0,0.85)] flex flex-col p-6 font-sans">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800/80 mb-4 shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-sky-500/10 border border-sky-500/20 text-sky-400 rounded-lg animate-pulse">
+                  <Clock size={16} />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">Automated Delivery Scheduler</h3>
+                  <p className="text-[9px] text-slate-500 font-mono tracking-wider mt-0.5 uppercase">E2EE Queued Transmission</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowScheduleModal(false)}
+                className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-colors cursor-pointer border border-transparent hover:border-slate-700/50"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="text-left">
+                <label className="block text-[9.5px] font-mono uppercase tracking-wider text-slate-400 mb-1.5 font-bold">Select Delivery Date & Time (Local)</label>
+                <input
+                  type="datetime-local"
+                  value={scheduledTime}
+                  onChange={(e) => setScheduledTime(e.target.value)}
+                  className="w-full text-xs h-11 px-3 bg-[#131722] border border-slate-800 rounded-lg outline-none text-sky-400 font-bold font-mono focus:border-sky-500/50 transition-colors"
+                />
+              </div>
+
+              {/* Convenience presets */}
+              <div className="text-left space-y-1.5">
+                <span className="block text-[8.5px] font-mono text-slate-500 uppercase font-bold tracking-widest">Speed presets</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { label: '+1 Minute (Test)', gap: 1 * 60000 },
+                    { label: '+5 Minutes', gap: 5 * 60000 },
+                    { label: '+1 Hour', gap: 60 * 60000 },
+                    { label: 'Tomorrow morning', gap: (() => {
+                      const d = new Date();
+                      d.setDate(d.getDate() + 1);
+                      d.setHours(9, 0, 0, 0);
+                      return d.getTime() - Date.now();
+                    })() }
+                  ].map((preset, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => {
+                        const targetDate = new Date(Date.now() + preset.gap);
+                        const tzOffset = targetDate.getTimezoneOffset() * 60000;
+                        const localTimeStr = (new Date(targetDate.getTime() - tzOffset)).toISOString().slice(0, 16);
+                        setScheduledTime(localTimeStr);
+                      }}
+                      className="py-1.5 px-2 bg-[#1A1F2B] hover:bg-sky-500/10 text-[9.5px] font-mono text-slate-350 hover:text-sky-300 rounded border border-slate-800 hover:border-sky-500/25 transition-all text-left cursor-pointer"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-3 bg-[#141824] border border-slate-800 rounded-xl space-y-1 text-[9.5px] leading-relaxed text-slate-400 tracking-tight font-sans text-left">
+                <span className="block text-[9px] text-sky-400 font-mono font-bold uppercase">Automated Server Release</span>
+                Message contents, attachments and metadata are fully secured and scheduled locally. Deep Talk's background dispatch cycle transmits E2EE packets securely at the selected epoch threshold.
+              </div>
+
+              <button
+                type="button"
+                onClick={handleConfirmScheduleMessage}
+                disabled={isScheduling}
+                className="w-full py-2.5 bg-sky-500 hover:bg-sky-450 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-xs font-bold font-sans uppercase tracking-wider text-slate-950 rounded-xl transition-all shadow-[0_4px_12px_rgba(14,165,233,0.15)] active:scale-98 cursor-pointer"
+              >
+                {isScheduling ? 'Queueing Secure Packet...' : 'Schedule Secure Transmission'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 10. Queued Scheduled Messages List Modal */}
+      {showScheduledListModal && (
+        <div id="scheduled-queue-modal" className="fixed inset-0 z-50 flex items-center justify-center bg-[#010204]/90 backdrop-blur-md p-4 animate-fade-in animate-duration-200">
+          <div className="relative w-full max-w-md overflow-hidden rounded-2xl bg-[#0E121A] border border-slate-800 shadow-[0_0_50px_rgba(0,0,0,0.85)] flex flex-col p-6 font-sans max-h-[80vh]">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800/80 mb-4 shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-sky-500/10 border border-sky-500/20 text-sky-400 rounded-lg">
+                  <Layers size={16} />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">Transmission Delay queue</h3>
+                  <p className="text-[9px] text-slate-500 font-mono tracking-wider mt-0.5 uppercase">Awaiting Epoch Threshold Release</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowScheduledListModal(false)}
+                className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-colors cursor-pointer border border-transparent hover:border-slate-700/50"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* List queue items */}
+            <div className="flex-1 overflow-y-auto space-y-3 pr-1 text-left">
+              {scheduledMessages.length === 0 ? (
+                <div className="py-12 text-center flex flex-col items-center justify-center space-y-2">
+                  <Clock size={28} className="text-slate-600 animate-pulse" />
+                  <span className="text-xs font-sans text-slate-400">All transmissions dispatched successfully.</span>
+                </div>
+              ) : (
+                scheduledMessages.map((msg, idx) => {
+                  let decryptedText = msg.content;
+                  if (msg.isEncrypted) {
+                    decryptedText = '🔐 [Secure encrypted payload: Scheduled message]';
+                  }
+                  const departsInSecs = Math.max(0, Math.round((msg.scheduledAt - Date.now()) / 1000));
+                  const departsInStr = departsInSecs > 120 
+                    ? `Departing in ${Math.round(departsInSecs / 60)} min` 
+                    : `Departing in ${departsInSecs}s`;
+
+                  const targetTimeStr = new Date(msg.scheduledAt).toISOString().replace('T', ' ').substring(11, 19);
+
+                  return (
+                    <div key={msg.id || idx} className="p-3 bg-[#131722] border border-slate-850 hover:border-slate-800 rounded-xl space-y-2 transition-all">
+                      <div className="flex items-center justify-between gap-2 border-b border-slate-800/40 pb-1.5 shrink-0">
+                        <span className="text-[9px] font-mono bg-sky-500/10 text-sky-400 px-1.5 py-0.5 border border-sky-500/20 rounded font-black tracking-wide uppercase">
+                          {departsInStr}
+                        </span>
+                        <span className="text-[9px] text-slate-500 font-mono">Release: {targetTimeStr} UTC</span>
+                      </div>
+                      <div className="text-xs text-slate-300 break-words line-clamp-2 pr-1 select-none leading-relaxed font-sans">
+                        {decryptedText}
+                      </div>
+                      {msg.fileName && (
+                        <div className="inline-flex items-center gap-1.5 text-[9px] text-emerald-400 font-mono bg-emerald-500/5 px-2 py-0.5 rounded border border-emerald-500/10">
+                          <span>📎 Attachment: {msg.fileName}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-end pt-1.5">
+                        <button
+                          onClick={() => handleCancelScheduledMessage(msg.id)}
+                          className="px-2 py-1 text-rose-450 hover:text-white bg-rose-500/10 hover:bg-rose-500 border border-thin border-rose-500/20 hover:border-transparent rounded font-mono font-bold text-[8.5px] uppercase tracking-widest transition-all cursor-pointer"
+                        >
+                          Cancel Delivery
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-slate-850 shrink-0 text-center text-[9px] text-slate-500 font-mono uppercase font-bold">
+              Current queue: {scheduledMessages.length} Pending
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 11. Peer User Cryptographic Profile Modal */}
+      {viewingUserProfile && (
+        <div id="peer-profile-modal" className="fixed inset-0 z-50 flex items-center justify-center bg-[#010204]/90 backdrop-blur-md p-4 animate-fade-in animate-duration-200">
+          <div className="relative w-full max-w-sm overflow-hidden rounded-2xl bg-[#0E121A] border border-slate-800 shadow-[0_0_50px_rgba(0,0,0,0.85)] flex flex-col font-sans">
+            
+            {/* Colorful Cyber Banner */}
+            <div className="h-24 bg-[#0d1527] relative flex items-end px-5 pb-3 font-sans">
+              <div className="absolute inset-0 bg-black/20" />
+              <div className="absolute right-4 top-4 z-10">
+                <button
+                  onClick={() => setViewingUserProfile(null)}
+                  className="p-1.5 bg-black/60 hover:bg-slate-800 text-slate-300 hover:text-white rounded-full transition-colors cursor-pointer border border-transparent hover:border-slate-700/50"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+
+            {/* Avatar Position Overlay */}
+            <div className="relative px-5 pb-6">
+              <div className="absolute -top-12 left-5">
+                <img
+                  src={viewingUserProfile.avatarUrl}
+                  alt={viewingUserProfile.displayName}
+                  referrerPolicy="no-referrer"
+                  className="w-20 h-20 rounded-2xl bg-[#1A1F2B] object-cover border-4 border-[#0E121A] shadow-lg"
+                />
+              </div>
+
+              {/* Identity Details */}
+              <div className="pt-10 text-left space-y-4">
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <h3 className="text-base font-bold text-slate-100 font-sans tracking-tight">{viewingUserProfile.displayName}</h3>
+                    <span className="px-1.5 py-0.5 bg-emerald-550/10 text-emerald-450 font-mono text-[8.5px] rounded border border-emerald-500/20 uppercase font-black tracking-wider leading-none">
+                      Active
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-500 font-mono tracking-tight block mt-0.5">@{viewingUserProfile.username}</span>
+                </div>
+
+                <div className="space-y-1 p-3 bg-[#131722] border border-slate-850 rounded-xl text-left">
+                  <span className="text-[8.5px] uppercase font-mono text-slate-500 tracking-wider block font-bold">Secure Account Registry</span>
+                  <div className="text-xs text-slate-350 pr-1 select-none leading-relaxed italic">
+                    "{viewingUserProfile.bio || 'This cryptographically synchronized Deep Talk agent is verifying secure packets over local devices.'}"
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 text-left">
+                  <span className="block text-[8.5px] font-mono text-slate-500 uppercase tracking-widest font-black">E2EE Cryptographic fingerprint</span>
+                  <div className="p-2.5 bg-black/45 border border-slate-850 rounded-lg text-slate-400 text-[10px] font-mono select-all break-all tracking-wider text-center leading-relaxed">
+                    {viewingUserProfile.publicKey ? viewingUserProfile.publicKey.substring(0, 32).toUpperCase().replace(/.{4}/g, '$& ') + '...' : 'Key Not Synced'}
+                  </div>
+                  <span className="text-[9px] text-[#A2AEC4] font-semibold flex items-center gap-1 px-1 mt-1 font-mono uppercase bg-emerald-500/10 py-1 border border-emerald-500/15 rounded justify-center leading-none">
+                    ✓ Identity Verified via E2EE Keys
+                  </span>
+                </div>
+
+                {currentUser && viewingUserProfile.id !== currentUser.id && (
+                  <button
+                    onClick={() => handleToggleBlockUser(viewingUserProfile.id)}
+                    disabled={blockingInProgress}
+                    className={`w-full py-2.5 rounded-xl text-xs font-bold font-mono uppercase tracking-wider transition-all cursor-pointer border flex items-center justify-center gap-1.5 ${
+                      currentUser.blockedUsers?.includes(viewingUserProfile.id)
+                        ? 'bg-[#E11D48]/15 hover:bg-[#E11D48]/25 text-[#FB7185] border-[#F43F5E]/30 shadow-[0_0_15px_rgba(244,63,94,0.15)]'
+                        : 'bg-[#B91C1C] hover:bg-[#DC2626] text-white border-transparent shadow-[0_0_15px_rgba(220,38,38,0.2)]'
+                    }`}
+                  >
+                    <Ban size={13} />
+                    {currentUser.blockedUsers?.includes(viewingUserProfile.id) 
+                      ? 'Unblock User' 
+                      : 'Block User'}
+                  </button>
+                )}
+
+                <button
+                  onClick={() => setViewingUserProfile(null)}
+                  className="w-full py-2.5 bg-slate-800 hover:bg-slate-755 text-xs text-slate-200 font-bold tracking-wider rounded-xl transition-all cursor-pointer border border-slate-700/40 font-mono uppercase"
+                >
+                  Close Profile card
+                </button>
+              </div>
+
+            </div>
           </div>
         </div>
       )}

@@ -209,7 +209,7 @@ async function startServer() {
   // API: Update user settings (e.g., read receipts, displayName, avatarUrl, email, bio, phone)
   app.post('/api/users/:userId/settings', (req, res) => {
     const { userId } = req.params;
-    const { disableReadReceipts, displayName, avatarUrl, email, bio, phone } = req.body;
+    const { disableReadReceipts, displayName, avatarUrl, email, bio, phone, badge, bannerStyle, blockedUsers, onlineShow, reactionShow } = req.body;
 
     const db = readDb();
     const user = db.users.find((u: any) => u.id === userId);
@@ -236,6 +236,21 @@ async function startServer() {
     if (phone !== undefined) {
       user.phone = phone.trim();
     }
+    if (badge !== undefined) {
+      user.badge = badge.trim();
+    }
+    if (bannerStyle !== undefined) {
+      user.bannerStyle = bannerStyle.trim();
+    }
+    if (blockedUsers !== undefined && Array.isArray(blockedUsers)) {
+      user.blockedUsers = blockedUsers;
+    }
+    if (onlineShow !== undefined) {
+      user.onlineShow = !!onlineShow;
+    }
+    if (reactionShow !== undefined) {
+      user.reactionShow = !!reactionShow;
+    }
 
     writeDb(db);
 
@@ -246,7 +261,12 @@ async function startServer() {
       avatarUrl: user.avatarUrl,
       email: user.email,
       bio: user.bio,
-      phone: user.phone
+      phone: user.phone,
+      badge: user.badge,
+      bannerStyle: user.bannerStyle,
+      blockedUsers: user.blockedUsers,
+      onlineShow: user.onlineShow,
+      reactionShow: user.reactionShow,
     });
     res.json(user);
   });
@@ -255,7 +275,23 @@ async function startServer() {
   app.get('/api/users/:userId/chats', (req, res) => {
     const { userId } = req.params;
     const db = readDb();
-    const chats = db.chats.filter((c: any) => c.participants.includes(userId));
+    const user = db.users.find((u: any) => u.id === userId);
+    const blockedUsersOfUser = user?.blockedUsers || [];
+
+    const chats = db.chats.filter((c: any) => {
+      if (!c.participants.includes(userId)) return false;
+      if (c.type === 'direct') {
+        const peerId = c.participants.find((p: any) => p !== userId);
+        if (peerId) {
+          const peer = db.users.find((u: any) => u.id === peerId);
+          const peerBlocked = peer?.blockedUsers || [];
+          if (blockedUsersOfUser.includes(peerId) || peerBlocked.includes(userId)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
     res.json(chats);
   });
 
@@ -263,10 +299,27 @@ async function startServer() {
   app.get('/api/users/:userId/messages', (req, res) => {
     const { userId } = req.params;
     const db = readDb();
-    const userChatIds = db.chats
-      .filter((c: any) => c.participants.includes(userId))
+    const user = db.users.find((u: any) => u.id === userId);
+    const blockedUsersOfUser = user?.blockedUsers || [];
+
+    const visibleChatIds = db.chats
+      .filter((c: any) => {
+        if (!c.participants.includes(userId)) return false;
+        if (c.type === 'direct') {
+          const peerId = c.participants.find((p: any) => p !== userId);
+          if (peerId) {
+            const peer = db.users.find((u: any) => u.id === peerId);
+            const peerBlocked = peer?.blockedUsers || [];
+            if (blockedUsersOfUser.includes(peerId) || peerBlocked.includes(userId)) {
+              return false;
+            }
+          }
+        }
+        return true;
+      })
       .map((c: any) => c.id);
-    const messages = db.messages.filter((m: any) => userChatIds.includes(m.chatId));
+
+    const messages = db.messages.filter((m: any) => visibleChatIds.includes(m.chatId));
     res.json(messages);
   });
 
@@ -417,7 +470,7 @@ async function startServer() {
   // API: Post message (E2EE payload or normal)
   app.post('/api/chats/:chatId/messages', (req, res) => {
     const { chatId } = req.params;
-    const { senderId, senderName, content, isEncrypted, type, fileName, fileSize, fileMimeType, fileUrl, selfDestructDuration } = req.body;
+    const { senderId, senderName, content, isEncrypted, type, fileName, fileSize, fileMimeType, fileUrl, selfDestructDuration, replyToId } = req.body;
 
     // Fixed the file sharing content validation bug: permit empty content if there is a file shared
     if (!senderId || (content === undefined || content === null)) {
@@ -430,6 +483,21 @@ async function startServer() {
     if (!chat) {
       res.status(404).json({ error: 'Chat not found' });
       return;
+    }
+
+    // Block check
+    if (chat.type === 'direct') {
+      const peerId = chat.participants.find((p: any) => p !== senderId);
+      if (peerId) {
+        const peer = db.users.find((u: any) => u.id === peerId);
+        const sender = db.users.find((u: any) => u.id === senderId);
+        const peerBlocked = peer?.blockedUsers || [];
+        const senderBlocked = sender?.blockedUsers || [];
+        if (peerBlocked.includes(senderId) || senderBlocked.includes(peerId)) {
+          res.status(403).json({ error: 'Communication is blocked with this user.' });
+          return;
+        }
+      }
     }
 
     const message = {
@@ -448,7 +516,8 @@ async function startServer() {
       selfDestructDuration: selfDestructDuration || 0, // in seconds (0 = never)
       viewedBy: [senderId],
       recalled: false,
-      reactions: []
+      reactions: [],
+      replyToId: replyToId || undefined
     };
 
     db.messages.push(message);
@@ -456,6 +525,96 @@ async function startServer() {
 
     broadcast('message', message);
     res.json(message);
+  });
+
+  // API: Get scheduled messages for a chat
+  app.get('/api/chats/:chatId/scheduled', (req, res) => {
+    const { chatId } = req.params;
+    const db = readDb();
+    if (!db.scheduled) db.scheduled = [];
+    const scheduled = db.scheduled.filter((msg: any) => msg.chatId === chatId);
+    res.json(scheduled);
+  });
+
+  // API: Add a scheduled message
+  app.post('/api/chats/:chatId/scheduled', (req, res) => {
+    const { chatId } = req.params;
+    const { senderId, senderName, content, isEncrypted, type, fileName, fileSize, fileMimeType, fileUrl, selfDestructDuration, scheduledAt, replyToId } = req.body;
+
+    if (!senderId || !scheduledAt) {
+      res.status(400).json({ error: 'Sender and scheduledAt timestamp are required' });
+      return;
+    }
+
+    const db = readDb();
+    const chat = db.chats.find((c: any) => c.id === chatId);
+    if (!chat) {
+      res.status(404).json({ error: 'Chat not found' });
+      return;
+    }
+
+    // Block check
+    if (chat.type === 'direct') {
+      const peerId = chat.participants.find((p: any) => p !== senderId);
+      if (peerId) {
+        const peer = db.users.find((u: any) => u.id === peerId);
+        const sender = db.users.find((u: any) => u.id === senderId);
+        const peerBlocked = peer?.blockedUsers || [];
+        const senderBlocked = sender?.blockedUsers || [];
+        if (peerBlocked.includes(senderId) || senderBlocked.includes(peerId)) {
+          res.status(403).json({ error: 'Communication is blocked with this user.' });
+          return;
+        }
+      }
+    }
+
+    if (!db.scheduled) {
+      db.scheduled = [];
+    }
+
+    const scheduledMsg = {
+      id: 'sched_' + Math.random().toString(36).substring(2, 11),
+      chatId,
+      senderId,
+      senderName,
+      content,
+      isEncrypted: !!isEncrypted,
+      type: type || 'text',
+      fileName,
+      fileSize,
+      fileMimeType,
+      fileUrl,
+      scheduledAt: Number(scheduledAt),
+      selfDestructDuration: selfDestructDuration || 0,
+      replyToId: replyToId || undefined
+    };
+
+    db.scheduled.push(scheduledMsg);
+    writeDb(db);
+
+    broadcast('scheduled_updated', { chatId });
+    res.json(scheduledMsg);
+  });
+
+  // API: Delete (cancel) a scheduled message
+  app.delete('/api/scheduled/:messageId', (req, res) => {
+    const { messageId } = req.params;
+    const db = readDb();
+    if (!db.scheduled) db.scheduled = [];
+
+    const initialLen = db.scheduled.length;
+    const matched = db.scheduled.find((m: any) => m.id === messageId);
+    db.scheduled = db.scheduled.filter((m: any) => m.id !== messageId);
+
+    if (db.scheduled.length < initialLen) {
+      writeDb(db);
+      if (matched) {
+        broadcast('scheduled_updated', { chatId: matched.chatId });
+      }
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: 'Scheduled message not found' });
+    }
   });
 
   // API: Mark message as read/viewed (starts self-destruct timers)
@@ -718,6 +877,71 @@ async function startServer() {
       console.error('[CLEANUP SYSTEM ERROR]', err);
     }
   }, 15000); // Trigger cleanup sweep every 15 seconds
+
+  // Automated background scheduler for scheduled messages
+  setInterval(() => {
+    try {
+      const db = readDb();
+      if (!db.scheduled) {
+        db.scheduled = [];
+        return;
+      }
+      const now = Date.now();
+      const readyToDispatch = db.scheduled.filter((msg: any) => msg.scheduledAt <= now);
+      
+      if (readyToDispatch.length > 0) {
+        db.scheduled = db.scheduled.filter((msg: any) => msg.scheduledAt > now);
+        
+        readyToDispatch.forEach((msg: any) => {
+          // Block check
+          const chat = db.chats.find((c: any) => c.id === msg.chatId);
+          if (chat && chat.type === 'direct') {
+            const peerId = chat.participants.find((p: any) => p !== msg.senderId);
+            if (peerId) {
+              const peer = db.users.find((u: any) => u.id === peerId);
+              const sender = db.users.find((u: any) => u.id === msg.senderId);
+              const peerBlocked = peer?.blockedUsers || [];
+              const senderBlocked = sender?.blockedUsers || [];
+              if (peerBlocked.includes(msg.senderId) || senderBlocked.includes(peerId)) {
+                console.log(`[SCHEDULER] Dropped dispatch due to block between ${msg.senderId} and ${peerId}`);
+                return;
+              }
+            }
+          }
+
+          const finalMsg = {
+            id: msg.id || 'msg_' + Math.random().toString(36).substring(2, 11),
+            chatId: msg.chatId,
+            senderId: msg.senderId,
+            senderName: msg.senderName,
+            content: msg.content,
+            isEncrypted: !!msg.isEncrypted,
+            type: msg.type || 'text',
+            fileName: msg.fileName,
+            fileSize: msg.fileSize,
+            fileMimeType: msg.fileMimeType,
+            fileUrl: msg.fileUrl,
+            timestamp: Date.now(),
+            selfDestructDuration: msg.selfDestructDuration || 0,
+            viewedBy: [msg.senderId],
+            recalled: false,
+            reactions: [],
+            replyToId: msg.replyToId || undefined
+          };
+          db.messages.push(finalMsg);
+          
+          // Broadcast to connected SSE clients
+          broadcast('message', finalMsg);
+          // Broadcast scheduled list updated so client list refreshes live too!
+          broadcast('scheduled_updated', { chatId: msg.chatId });
+        });
+        
+        writeDb(db);
+      }
+    } catch (err) {
+      console.error('Error ticking scheduled messages background worker:', err);
+    }
+  }, 4000);
 
   // Setup Vite Dev server or Production static serving
   if (process.env.NODE_ENV !== 'production') {

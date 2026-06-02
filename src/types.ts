@@ -19,6 +19,11 @@ export interface UserProfile {
   email?: string;
   bio?: string;
   phone?: string;
+  badge?: string;
+  bannerStyle?: string;
+  onlineShow?: boolean;
+  reactionShow?: boolean;
+  blockedUsers?: string[];
 }
 
 export interface Reaction {
@@ -76,7 +81,7 @@ export interface CallState {
 
 // REST & Sync API Payload Types
 export interface SyncEvent {
-  type: 'message' | 'message_deleted' | 'message_recalled' | 'message_viewed' | 'message_viewed_suppressed' | 'reaction' | 'note_update' | 'call_event' | 'chat_updated' | 'chat_deleted' | 'typing_event' | 'user_registered' | 'user_deleted' | 'user_settings_updated';
+  type: 'message' | 'message_deleted' | 'message_recalled' | 'message_viewed' | 'message_viewed_suppressed' | 'reaction' | 'note_update' | 'call_event' | 'chat_updated' | 'chat_deleted' | 'typing_event' | 'user_registered' | 'user_deleted' | 'user_settings_updated' | 'scheduled_updated';
   payload: any;
   timestamp: number;
 }
