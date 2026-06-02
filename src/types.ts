@@ -66,6 +66,8 @@ export interface Chat {
   sharedNotesModifiedBy?: string;
   pinned?: boolean;
   pinnedMessageId?: string | null; // ID of the pinned message in this chat
+  backupLocked?: boolean;
+  backupLockedBy?: string | null;
 }
 
 export interface CallState {
@@ -81,7 +83,7 @@ export interface CallState {
 
 // REST & Sync API Payload Types
 export interface SyncEvent {
-  type: 'message' | 'message_deleted' | 'message_recalled' | 'message_viewed' | 'message_viewed_suppressed' | 'reaction' | 'note_update' | 'call_event' | 'chat_updated' | 'chat_deleted' | 'typing_event' | 'user_registered' | 'user_deleted' | 'user_settings_updated' | 'scheduled_updated';
+  type: 'message' | 'message_deleted' | 'message_recalled' | 'message_viewed' | 'message_viewed_suppressed' | 'reaction' | 'note_update' | 'call_event' | 'chat_updated' | 'chat_deleted' | 'typing_event' | 'user_registered' | 'user_deleted' | 'user_settings_updated' | 'scheduled_updated' | 'backup_handshake_requested' | 'backup_handshake_approved' | 'backup_handshake_denied';
   payload: any;
   timestamp: number;
 }

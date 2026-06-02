@@ -134,6 +134,7 @@ export default function App() {
   const [sidebarTab, setSidebarTab] = useState<'chats' | 'starred' | 'archived'>('chats');
 
   // Interactive Card & Custom Location states
+  const [revealedCardId, setRevealedCardId] = useState<string | null>(null);
   const [cardTheme, setCardTheme] = useState<'obsidian' | 'blue' | 'platinum' | 'gold'>('obsidian');
   const [cardExpiry, setCardExpiry] = useState('12/31');
   const [cardCvv, setCardCvv] = useState('303');
@@ -143,6 +144,17 @@ export default function App() {
   const [manualLng, setManualLng] = useState('8.5391');
   const [manualAddr, setManualAddr] = useState('Zurich Bank Vault, Switzerland');
   const [locationActiveType, setLocationActiveType] = useState<'current' | 'custom'>('current');
+
+  // Voice message and attachments name customize states
+  const [isRenamingFile, setIsRenamingFile] = useState(false);
+  const [fileNameInput, setFileNameInput] = useState('');
+
+  // Backup locking handshake states
+  const [incomingHandshakeRequest, setIncomingHandshakeRequest] = useState<{ chatId: string; requesterId: string; requesterName: string; format: string } | null>(null);
+  const [outgoingHandshakeAwaiting, setOutgoingHandshakeAwaiting] = useState<{ chatId: string; format: string; status: 'pending' | 'denied' | 'approved' } | null>(null);
+
+  // Automated delivery scheduler enhanced state
+  const [schedulerSecurityProtocol, setSchedulerSecurityProtocol] = useState<'standard' | 'ghost' | 'decoy'>('standard');
 
   const [avatarStyle, setAvatarStyle] = useState<'identicon' | 'bottts' | 'pixel-art' | 'fun-emoji' | 'lorelei' | 'shapes'>('identicon');
   const [avatarSeed, setAvatarSeed] = useState(Math.random().toString(36).substring(7));
@@ -479,6 +491,39 @@ export default function App() {
             break;
           }
 
+          case 'backup_handshake_requested': {
+            const req = payload;
+            if (currentUser && req.requesterId !== currentUser.id) {
+              // Ensure we are the one who locked it in the chat
+              setChats(prev => {
+                const targetChat = prev.find(c => c.id === req.chatId);
+                if (targetChat && targetChat.backupLocked && targetChat.backupLockedBy === currentUser.id) {
+                  setIncomingHandshakeRequest(req);
+                }
+                return prev;
+              });
+            }
+            break;
+          }
+
+          case 'backup_handshake_approved': {
+            const approved = payload;
+            if (currentUser && approved.requesterId === currentUser.id) {
+              setOutgoingHandshakeAwaiting(null);
+              // download start trigger!
+              handleExportHistory(approved.format, true);
+            }
+            break;
+          }
+
+          case 'backup_handshake_denied': {
+            const denied = payload;
+            if (currentUser && denied.requesterId === currentUser.id) {
+              setOutgoingHandshakeAwaiting(prev => prev ? { ...prev, status: 'denied' } : null);
+            }
+            break;
+          }
+
           case 'chat_deleted': {
             const { chatId } = payload;
             setChats(prev => prev.filter(c => c.id !== chatId));
@@ -627,6 +672,16 @@ export default function App() {
       fetchUsers();
     }
   }, [showAdminModal]);
+
+  // Sync selected file name input
+  useEffect(() => {
+    if (selectedFile) {
+      setFileNameInput(selectedFile.name);
+    } else {
+      setFileNameInput('');
+      setIsRenamingFile(false);
+    }
+  }, [selectedFile]);
 
   // Decryption trigger hook
   useEffect(() => {
@@ -1264,6 +1319,35 @@ export default function App() {
     } catch (err) {
       console.error('Error sending location:', err);
     }
+  };
+
+  const handleAutoGenerateCard = () => {
+    const banks = ['Zurich Credit Lab', 'Royal Cryptographic Trust', 'Swiss Federal Vault', 'Grand Cayman Safe Bank'];
+    const bank = banks[Math.floor(Math.random() * banks.length)];
+    
+    const isVisa = Math.random() > 0.5;
+    const type = isVisa ? 'Visa' : 'Mastercard';
+    setCardTypeInput(type as any);
+    setCardBankInput(bank);
+    
+    const prefix = isVisa ? '4' : '5';
+    let cardNo = prefix;
+    for (let i = 0; i < 15; i++) {
+      cardNo += Math.floor(Math.random() * 10).toString();
+    }
+    setCardNoInput(cardNo);
+    
+    const month = String(Math.floor(Math.random() * 12) + 1).padStart(2, '0');
+    const year = (26 + Math.floor(Math.random() * 6)).toString();
+    setCardExpiry(`${month}/${year}`);
+    
+    setCardCvv(String(Math.floor(Math.random() * 900) + 100));
+    
+    const names = ['John Carter', 'Evelyn Vane', 'Julian Finch', 'Cassian Cole', 'Elena Vance'];
+    setCardHolderInput(names[Math.floor(Math.random() * names.length)]);
+    
+    const themes = ['obsidian', 'blue', 'platinum', 'gold'] as const;
+    setCardTheme(themes[Math.floor(Math.random() * themes.length)]);
   };
 
   const handleSendCard = async () => {
@@ -2107,10 +2191,51 @@ export default function App() {
     }
   };
 
-  const handleExportHistory = (format: 'txt' | 'html' | 'json' | 'md' | 'csv') => {
+  const handleToggleLockBackup = async () => {
+    if (!activeChatId || !currentUser) return;
+    const activeChat = chats.find(c => c.id === activeChatId);
+    if (!activeChat) return;
+
+    const currentlyLocked = !!activeChat.backupLocked;
+    try {
+      await fetch(`/api/chats/${activeChatId}/lock-backup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          locked: !currentlyLocked,
+          userId: currentUser.id
+        })
+      });
+    } catch (e) {
+      console.error('Failed to change backup lock status:', e);
+    }
+  };
+
+  const handleExportHistory = (format: 'txt' | 'html' | 'json' | 'md' | 'csv', forceBypass = false) => {
     if (!activeChatId) return;
     const activeChat = chats.find(c => c.id === activeChatId);
     if (!activeChat) return;
+
+    // Check if backups are locked by peer user
+    if (activeChat.backupLocked && activeChat.backupLockedBy !== currentUser?.id && !forceBypass) {
+      // Dispatch a secure handshake request to the other user
+      fetch(`/api/chats/${activeChatId}/request-backup-unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requesterId: currentUser?.id,
+          requesterName: currentUser?.displayName || currentUser?.username,
+          format
+        })
+      }).catch(err => console.error('Failed to dispatch backup handshake request:', err));
+
+      setOutgoingHandshakeAwaiting({
+        chatId: activeChatId,
+        format,
+        status: 'pending'
+      });
+      return;
+    }
 
     // Get chat name for filename
     let chatName = activeChat.name || 'Group Chat';
@@ -3324,6 +3449,39 @@ export default function App() {
                               <Table size={13} className="text-amber-400" />
                               Excel Comma Separated (.csv)
                             </button>
+                            <div className="border-t border-slate-800/80 my-1 pb-0.5" />
+                            {activeChat.backupLocked ? (
+                              activeChat.backupLockedBy === currentUser?.id ? (
+                                <button
+                                  onClick={() => {
+                                    handleToggleLockBackup();
+                                    setShowExportMenu(false);
+                                  }}
+                                  className="w-full text-left px-3 py-2 text-[11px] text-amber-400 hover:text-white hover:bg-amber-500/10 rounded-lg transition-all flex items-center gap-2.5 cursor-pointer font-bold"
+                                  title="Unlocks database download capabilities on this cryptographically bound line."
+                                >
+                                  <Lock size={13} className="text-amber-400 animate-pulse" />
+                                  Unlock Backups
+                                </button>
+                              ) : (
+                                <div className="w-full text-left px-3 py-2 text-[10px] text-slate-500 rounded-lg flex items-center gap-2 font-bold font-sans select-none bg-slate-900/30">
+                                  <Lock size={12} className="text-rose-500/70" />
+                                  Locked by Partner
+                                </div>
+                              )
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  handleToggleLockBackup();
+                                  setShowExportMenu(false);
+                                }}
+                                className="w-full text-left px-3 py-2 text-[11px] text-sky-455 hover:text-white hover:bg-sky-500/10 rounded-lg transition-all flex items-center gap-2.5 cursor-pointer font-bold"
+                                title="Enforces mutual consent. Partner will require a real-time decryption handshake request on their display before downloading."
+                              >
+                                <Unlock size={13} className="text-sky-400" />
+                                Lock Backups
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -3584,7 +3742,7 @@ export default function App() {
                         className={`flex flex-col ${isSelf ? 'items-end' : 'items-start'} group/msg relative`}
                       >
                         {/* Reaction Trigger Panel */}
-                        {!isRecalled && (
+                        {!isRecalled && (currentUser?.reactionShow !== false) && (
                           <div
                             className={`absolute -top-7 z-10 hidden group-hover/msg:flex items-center gap-1.5 bg-[#0E121A] p-1.5 rounded-xl border border-slate-800 shadow-xl ${
                               isSelf ? 'right-2' : 'left-2'
@@ -3850,11 +4008,16 @@ export default function App() {
                                     bgClass = 'bg-gradient-to-br from-[#261d10] via-[#4a361c] to-[#14100b] border-amber-500/40 shadow-amber-500/5';
                                   }
 
+                                  const isRevealed = revealedCardId === msg.id;
                                   return (
-                                    <div className={`p-4 rounded-2xl w-72 h-44 border flex flex-col justify-between shadow-2xl relative overflow-hidden text-left transition-all ${bgClass}`}>
+                                    <div 
+                                      onClick={() => setRevealedCardId(isRevealed ? null : msg.id)}
+                                      className={`p-4 rounded-2xl w-72 h-44 border flex flex-col justify-between shadow-2xl relative overflow-hidden text-left transition-all cursor-pointer hover:scale-[1.02] duration-200 group/visualcard ${bgClass}`}
+                                      title="Click card to reveal / hide account numbers"
+                                    >
                                       <div className="absolute right-0 top-0 w-32 h-32 bg-white/5 rounded-full blur-3xl pointer-events-none" />
                                       <div className="flex items-center justify-between z-10">
-                                        <span className="text-[10px] font-extrabold text-slate-300 font-mono tracking-widest uppercase">
+                                        <span className="text-[10px] font-extrabold text-slate-300 font-mono tracking-widest uppercase truncate max-w-[150px]">
                                           {cardPayload.bankName || 'Sovereign Bank'}
                                         </span>
                                         {cardPayload.cardType === 'Visa' ? (
@@ -3865,15 +4028,21 @@ export default function App() {
                                       </div>
                                       <div className="flex items-center justify-between z-10 mt-1">
                                         <div className="w-8 h-6 bg-gradient-to-br from-yellow-300 to-amber-500 rounded border border-yellow-200/20 relative shadow-[0_2px_10px_rgba(0,0,0,0.3)] shrink-0">
-                                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,0,0,0.1),transparent)]" />
+                                          <div className="absolute inset-x-0 top-2 h-0.5 bg-slate-900/40" />
+                                          <div className="absolute inset-x-0 top-3.5 h-0.5 bg-slate-900/40" />
+                                          <div className="absolute left-3.5 inset-y-0 w-0.5 bg-slate-900/40" />
                                         </div>
                                         <div className="flex gap-0.5 text-slate-400 rotate-90 scale-75 font-mono select-none">
                                           <span>(((</span>
                                         </div>
-                                        <span className="text-[7px] font-mono text-slate-500 uppercase tracking-widest leading-none shrink-0 self-center">E2EE CHIP SECURE</span>
+                                        <span className={`text-[8px] font-mono uppercase tracking-widest leading-none shrink-0 self-center font-bold transition-all px-1.5 py-0.5 rounded ${isRevealed ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse' : 'text-slate-500'}`}>
+                                          {isRevealed ? 'DECRYPTED' : '🔐 E2EE SECURE'}
+                                        </span>
                                       </div>
                                       <div className="text-sm font-semibold tracking-widest text-white font-mono my-2 z-10 select-all">
-                                        ••••  ••••  ••••  {cardPayload.cardNumber.slice(-4)}
+                                        {isRevealed 
+                                          ? cardPayload.cardNumber.replace(/(\d{4})/g, '$1 ').trim() 
+                                          : `••••  ••••  ••••  ${cardPayload.cardNumber.slice(-4)}`}
                                       </div>
                                       <div className="flex items-end justify-between font-mono z-10 leading-none">
                                         <div className="flex flex-col min-w-0 pr-2">
@@ -3882,11 +4051,15 @@ export default function App() {
                                         </div>
                                         <div className="flex flex-col text-center shrink-0">
                                           <span className="text-[7.5px] uppercase text-slate-450 tracking-wider">EXP</span>
-                                          <span className="text-[10px] font-bold text-slate-100 mt-0.5">{(cardPayload as any).expiry || "12/31"}</span>
+                                          <span className="text-[10px] font-bold text-slate-100 mt-0.5">
+                                            {isRevealed ? ((cardPayload as any).expiry || "12/31") : "**/**"}
+                                          </span>
                                         </div>
                                         <div className="flex flex-col text-right shrink-0">
                                           <span className="text-[7.5px] uppercase text-slate-455 tracking-wider">CVV</span>
-                                          <span className="text-[10px] font-bold text-slate-100 mt-0.5">{(cardPayload as any).cvv || "•••"}</span>
+                                          <span className="text-[10px] font-bold text-slate-100 mt-0.5">
+                                            {isRevealed ? ((cardPayload as any).cvv || "303") : "•••"}
+                                          </span>
                                         </div>
                                       </div>
                                     </div>
@@ -4190,7 +4363,7 @@ export default function App() {
                       const mType = getMediaType(selectedFile.name, selectedFile.type);
                       return (
                         <div className="p-3 rounded-lg bg-[#1A1F2B] border border-slate-800/80 flex items-center justify-between gap-4 font-mono animate-fade-in select-none">
-                          <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
                             {mType === 'image' ? (
                               <Eye size={14} className="text-sky-450 text-sky-400 shrink-0" />
                             ) : mType === 'video' ? (
@@ -4198,24 +4371,77 @@ export default function App() {
                             ) : (
                               <File size={14} className="text-slate-450 text-slate-400 shrink-0" />
                             )}
-                            <div className="flex flex-col min-w-0 font-sans">
-                              <span className="text-xs font-bold text-slate-200 truncate">{selectedFile.name}</span>
-                              <span className="text-[10px] text-slate-500 flex items-center gap-1.5 font-mono">
-                                <span>{formatBytes(selectedFile.size)}</span>
-                                <span className="text-slate-700">•</span>
-                                <span className={mType === 'binary' ? 'text-slate-400' : 'text-sky-400'}>
-                                  {mType === 'binary' ? 'Unsupported media (sent as file)' : 'Secured media packet'}
-                                </span>
-                              </span>
+                            <div className="flex-1 min-w-0">
+                              {isRenamingFile ? (
+                                <div className="flex items-center gap-2 max-w-full">
+                                  <input
+                                    type="text"
+                                    value={fileNameInput}
+                                    onChange={(e) => setFileNameInput(e.target.value)}
+                                    className="bg-slate-950 text-xs text-white border border-slate-700 rounded-lg px-2.5 py-1.5 w-full max-w-[240px] font-mono outline-none focus:border-sky-500/80 transition-all font-bold"
+                                    placeholder="Enter custom file name..."
+                                    autoFocus
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (fileNameInput.trim() && selectedFile) {
+                                        setSelectedFile({ ...selectedFile, name: fileNameInput.trim() });
+                                      }
+                                      setIsRenamingFile(false);
+                                    }}
+                                    className="px-2.5 py-1.5 bg-sky-500 hover:bg-sky-450 text-slate-950 font-extrabold text-[9px] rounded-lg uppercase tracking-wider transition-colors cursor-pointer shrink-0"
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setIsRenamingFile(false);
+                                    }}
+                                    className="px-2 py-1.5 text-slate-400 hover:text-white text-[9px] rounded-lg uppercase tracking-wider transition-colors cursor-pointer shrink-0 font-bold"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex flex-col min-w-0 font-sans">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className="text-xs font-bold text-slate-200 truncate">{selectedFile.name}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setFileNameInput(selectedFile.name);
+                                        setIsRenamingFile(true);
+                                      }}
+                                      className="px-2 py-0.5 rounded-md border border-sky-500/25 text-sky-450 text-[9px] uppercase hover:bg-sky-500/10 transition-colors cursor-pointer font-bold tracking-wider shrink-0"
+                                      title="Change file name"
+                                    >
+                                      Rename
+                                    </button>
+                                  </div>
+                                  <span className="text-[10px] text-slate-500 flex items-center gap-1.5 font-mono mt-0.5 animate-pulse">
+                                    <span>{formatBytes(selectedFile.size)}</span>
+                                    <span className="text-slate-700">•</span>
+                                    <span className={mType === 'binary' ? 'text-slate-400' : 'text-sky-400'}>
+                                      {selectedFile.name.startsWith('voice-message-') 
+                                        ? 'Awaiting secure E2EE Voice note dispatch' 
+                                        : 'Secured transmission packet'}
+                                    </span>
+                                  </span>
+                                </div>
+                              )}
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => setSelectedFile(null)}
-                            className="px-2.5 py-1 text-[10px] text-red-400 hover:bg-red-500/10 rounded border border-[#ef4444]/25 transition-colors font-bold uppercase tracking-wider cursor-pointer"
-                          >
-                            Discard
-                          </button>
+                          {!isRenamingFile && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedFile(null)}
+                              className="px-2.5 py-1 text-[10px] text-red-400 hover:bg-red-500/10 rounded border border-[#ef4444]/25 transition-colors font-bold uppercase tracking-wider cursor-pointer"
+                            >
+                              Discard
+                            </button>
+                          )}
                         </div>
                       );
                     })()}
@@ -5510,7 +5736,7 @@ export default function App() {
             </div>
 
             {/* Visual Real-time Interactive Card Preview */}
-            <div className="mb-6 flex justify-center">
+            <div className="mb-4 flex flex-col items-center gap-2.5">
               {(() => {
                 let bgClass = 'bg-gradient-to-br from-[#12141D] via-[#1A1E29] to-[#0A0C12] border-slate-700/80 shadow-[#12141d]/15';
                 if (cardTheme === 'blue') {
@@ -5538,7 +5764,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="text-sm font-bold tracking-widest text-white font-mono z-10 my-1 select-all">
+                    <div className="text-xs font-bold tracking-widest text-white font-mono z-10 my-1 select-all">
                       {cardNoInput ? cardNoInput.replace(/(\d{4})/g, '$1 ').trim() : '•••• •••• •••• ••••'}
                     </div>
 
@@ -5559,6 +5785,14 @@ export default function App() {
                   </div>
                 );
               })()}
+
+              <button
+                type="button"
+                onClick={handleAutoGenerateCard}
+                className="mt-1 px-3 py-1.5 rounded-xl border border-amber-500/25 bg-amber-500/10 text-amber-450 hover:bg-amber-500 hover:text-slate-950 transition-all font-mono text-[9px] font-extrabold uppercase tracking-widest flex items-center justify-center gap-1.5 cursor-pointer shadow-[0_2px_10px_rgba(245,158,11,0.05)]"
+              >
+                🎲 Auto-Generate Test Credentials
+              </button>
             </div>
 
             <div className="space-y-3 px-1 text-left mb-5">
@@ -5883,9 +6117,9 @@ export default function App() {
               {/* Convenience presets */}
               <div className="text-left space-y-1.5">
                 <span className="block text-[8.5px] font-mono text-slate-500 uppercase font-bold tracking-widest">Speed presets</span>
-                <div className="grid grid-cols-2 gap-1.5">
+                <div className="grid grid-cols-2 gap-1.5 font-sans">
                   {[
-                    { label: '+1 Minute (Test)', gap: 1 * 60000 },
+                    { label: '+1 Minute', gap: 1 * 60000 },
                     { label: '+5 Minutes', gap: 5 * 60000 },
                     { label: '+1 Hour', gap: 60 * 60000 },
                     { label: 'Tomorrow morning', gap: (() => {
@@ -5904,7 +6138,7 @@ export default function App() {
                         const localTimeStr = (new Date(targetDate.getTime() - tzOffset)).toISOString().slice(0, 16);
                         setScheduledTime(localTimeStr);
                       }}
-                      className="py-1.5 px-2 bg-[#1A1F2B] hover:bg-sky-500/10 text-[9.5px] font-mono text-slate-350 hover:text-sky-300 rounded border border-slate-800 hover:border-sky-500/25 transition-all text-left cursor-pointer"
+                      className="py-1.5 px-2 bg-[#1A1F2B] hover:bg-[#202738] text-[9.5px] font-mono text-slate-300 hover:text-sky-355 rounded-lg border border-slate-800 hover:border-sky-500/25 transition-all text-left cursor-pointer font-bold leading-none"
                     >
                       {preset.label}
                     </button>
@@ -5912,9 +6146,37 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Delivery Encryption Protocol (New Idea!) */}
+              <div className="text-left space-y-1.5">
+                <span className="block text-[8.5px] font-mono text-slate-500 uppercase font-bold tracking-widest">Delivery Encryption Protocol</span>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { id: 'standard', name: 'Standard', desc: 'Secure release' },
+                    { id: 'ghost', name: 'Ghost Out', desc: 'Silent bypass' },
+                    { id: 'decoy', name: 'Decoy Msg', desc: 'Masked alert' }
+                  ].map(p => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setSchedulerSecurityProtocol(p.id as any)}
+                      className={`p-2 rounded-lg text-left border font-mono transition-all cursor-pointer ${
+                        schedulerSecurityProtocol === p.id
+                          ? 'bg-sky-500/10 border-sky-500/60 text-sky-400'
+                          : 'bg-[#131722]/60 border-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-[#1C202F]'
+                      }`}
+                    >
+                      <span className="block text-[10px] font-extrabold uppercase tracking-tight leading-none">{p.name}</span>
+                      <span className="block text-[8px] text-slate-500 font-sans mt-0.5 leading-tight">{p.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="p-3 bg-[#141824] border border-slate-800 rounded-xl space-y-1 text-[9.5px] leading-relaxed text-slate-400 tracking-tight font-sans text-left">
                 <span className="block text-[9px] text-sky-400 font-mono font-bold uppercase">Automated Server Release</span>
-                Message contents, attachments and metadata are fully secured and scheduled locally. Deep Talk's background dispatch cycle transmits E2EE packets securely at the selected epoch threshold.
+                {schedulerSecurityProtocol === 'standard' && "Message contents, attachments and metadata are fully secured and scheduled locally. E2EE packets will transmit securely at the selected epoch threshold."}
+                {schedulerSecurityProtocol === 'ghost' && "Ghost Protocol: Message packets transmit into peer devices silently without playing sounds, bypassing active notification streams or screen intercepts."}
+                {schedulerSecurityProtocol === 'decoy' && "Decoy Protocol: Sends a customizable system-update alert packet first. Recipient must perform a quick device unlock shake to decrypt the genuine payload."}
               </div>
 
               <button

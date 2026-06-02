@@ -4,9 +4,9 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { fileURLToPath } from 'url';
 
-// Fix __dirname in ES Modules context
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Fix __dirname in ES Modules context safely
+const __filename = (typeof import.meta !== 'undefined' && import.meta?.url) ? fileURLToPath(import.meta.url) : '';
+const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 
 const PORT = 3000;
 const DB_FILE = path.join(process.cwd(), 'database.json');
@@ -448,6 +448,67 @@ async function startServer() {
 
     broadcast('chat_deleted', { chatId });
     res.json({ success: true });
+  });
+
+  // API: Lock or Unlock dynamic chat backups
+  app.post('/api/chats/:chatId/lock-backup', (req, res) => {
+    const { chatId } = req.params;
+    const { locked, userId } = req.body;
+    const db = readDb();
+    const chat = db.chats.find((c: any) => c.id === chatId);
+    if (!chat) {
+      res.status(404).json({ error: 'Conversation not found' });
+      return;
+    }
+    chat.backupLocked = !!locked;
+    chat.backupLockedBy = locked ? userId : null;
+    writeDb(db);
+    broadcast('chat_updated', chat);
+    res.json(chat);
+  });
+
+  // API: Request peer backup unlock
+  app.post('/api/chats/:chatId/request-backup-unlock', (req, res) => {
+    const { chatId } = req.params;
+    const { requesterId, requesterName, format } = req.body;
+    broadcast('backup_handshake_requested', {
+      chatId,
+      requesterId,
+      requesterName,
+      format
+    });
+    res.json({ status: 'requested' });
+  });
+
+  // API: Approve backup unlock requested by peer
+  app.post('/api/chats/:chatId/approve-backup-unlock', (req, res) => {
+    const { chatId } = req.params;
+    const { requesterId, format } = req.body;
+    const db = readDb();
+    const chat = db.chats.find((c: any) => c.id === chatId);
+    if (chat) {
+      chat.backupLocked = false;
+      chat.backupLockedBy = null;
+      writeDb(db);
+      broadcast('chat_updated', chat);
+    }
+    broadcast('backup_handshake_approved', {
+      chatId,
+      requesterId,
+      format
+    });
+    res.json({ status: 'approved' });
+  });
+
+  // API: Deny backup unlock requested by peer
+  app.post('/api/chats/:chatId/deny-backup-unlock', (req, res) => {
+    const { chatId } = req.params;
+    const { requesterId } = req.body;
+    broadcast('backup_handshake_denied', {
+      chatId,
+      requesterId
+    });
+    res.json({ status: 'denied' });
   });
 
   // API: Broadcast user typing state
